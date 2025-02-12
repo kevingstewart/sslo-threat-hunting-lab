@@ -1,0 +1,885 @@
+## SSL Orchestrator :: Threat Hunting Lab :: Servers
+## Maintainer: kevin-at-f5-dot-com
+## Last Updated: 2025-Feb-12
+##
+## Description: Provides a set of containers to perform various server functions:
+##   - explicit-proxy-service
+##        function: SSLO inspection service - explicit proxy service with Squid
+##        in:  VLAN tag 30 - 198.19.96.30/25 - port 3128
+##        out: VLAN tag 40 - 198.19.96.130/25
+##   - transparent-proxy-service
+##        function: SSLO inspection service - transparent proxy service with Squid
+##        in:  VLAN tag 10 - 198.19.98.30/25
+##        out: VLAN tag 20 - 198.19.98.130/25
+##   - layer3-service
+##        function: SSLO inspection service - inlineL3 service with Suricata
+##        in:  VLAN tag 60 - 198.19.64.30/25
+##        out: VLAN tag 70 - 198.19.64.130/25
+##   - icap-service
+##        function: SSLO inspection service - ICAP service with c-icap and clamav
+##        ip:  VLAN tag 50 - 198.19.97.50 - port 1344 - reqmod: /avscan - respmod: /avscan
+##   - nginx
+##        function: HTTPS frontend for multiple services
+##        - webserver1:    192.168.100.11:443
+##        - webserver2:    192.168.100.12:443
+##        - webserver3:    192.168.100.13:443 
+##        - eicar-server:  192.168.100.14:443 
+##        - beacon-server: 192.168.100.15:443
+##        - juiceshop2:    192.168.100.20:443
+##        - juiceshop1:    192.168.100.21:443
+##   - bind9
+##        function: local DNS server for badguys.com zone
+##        in:  192.168.100.8
+##   - guacamole
+##        function: webrdp access to the client desktop
+##        - gaucd
+##        - postgres
+##        - guacamole
+##
+## start containers
+##   docker compose -f docker-sslo-threathunting-servers.yaml up -d
+##
+## stop containers
+##   docker compose -f docker-sslo-threathunting-servers.yaml down
+
+services:
+
+  ##############################################
+  ### SSLO INSPECTION SERVICES
+  ##############################################
+
+  # SSLO Security Service: HTTP Proxy (explicit)
+  explicit-proxy-service:
+    container_name: explicit-proxy
+    image: sameersbn/squid:3.5.27-2
+    restart: unless-stopped
+    ports:
+      - '3128:3128'    
+    cap_add:
+      - NET_ADMIN
+    environment:
+      - TZ=UTC
+      - UPDATE_EP=1
+    networks:
+      default: {}
+      eproxy-net-in:
+        ipv4_address: 198.19.96.30
+      eproxy-net-out:
+        ipv4_address: 198.19.96.130
+    command:
+      - /bin/bash
+      - -c
+      - |
+        ## create squid.conf
+        cat > "/etc/squid/squid.conf" << 'EOF'
+        acl SSL_ports port 443
+        acl Safe_ports port 80
+        acl Safe_ports port 443
+        acl Safe_ports port 1025-65535
+        acl CONNECT method CONNECT
+        http_access deny !Safe_ports
+        http_access deny CONNECT !SSL_ports
+        http_access allow localhost manager
+        http_access deny manager
+        http_access allow localhost
+        http_access allow all
+        http_port 3128
+        coredump_dir /var/spool/squid
+        refresh_pattern -i (/cgi-bin/|\?) 0	0%	0
+        refresh_pattern (Release|Packages(.gz)*)$$      0       20%     2880
+        refresh_pattern .		0	20%	4320
+        cache deny all
+        logfile_rotate 0
+        logformat authheader %ts.%03tu %6tr %>a %Ss/%03>Hs %<st %rm %ru "%{X-Authenticated-User}>h" %Sh/%<a %mt
+        access_log /var/log/squid/access.log authheader
+        EOF
+
+        ## install utilities
+        apt update -y && apt upgrade -y
+        apt install apt-utils net-tools iproute2 tcpdump vim nano iputils-ping dnsutils -y
+
+        ## update routing
+        ip route delete default
+        ip route add default via 198.19.96.245
+        ip route add 10.1.10.0/24 via 198.19.96.7
+        ipaddr=$$(ip addr show dev eth0 |egrep -o 'inet [0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.' | cut -d' ' -f2)
+        ip route add 8.8.8.8 via $${ipaddr}1
+
+        ## add nameserver
+        echo "nameserver 8.8.8.8" > /etc/resolv.conf
+
+        ## start squid
+        /sbin/entrypoint.sh
+
+
+  # SSLO Security Service: HTTP Proxy (transparent)
+  transparent-proxy-service:
+    container_name: transparent-proxy
+    image: sameersbn/squid:3.5.27-2
+    restart: unless-stopped
+    cap_add:
+      - NET_ADMIN
+    environment:
+      - TZ=UTC
+    networks:
+      default: {}
+      tproxy-net-in:
+        ipv4_address: 198.19.98.30
+      tproxy-net-out:
+        ipv4_address: 198.19.98.130
+    command:
+      - /bin/bash
+      - -c
+      - |
+        ## create squid.conf
+        cat > "/etc/squid/squid.conf" << 'EOF'
+        http_access allow all
+        http_port 3128
+        coredump_dir /var/spool/squid
+        cache deny all
+        logfile_rotate 0
+        logformat authheader %ts.%03tu %6tr %>a %Ss/%03>Hs %<st %rm %ru "%{X-Authenticated-User}>h" %Sh/%<a %mt
+        access_log /var/log/squid/access.log authheader
+        EOF
+
+        ## install utilities
+        apt update -y && apt upgrade -y
+        apt install apt-utils net-tools iproute2 tcpdump vim nano iputils-ping iptables -y
+
+        ## updating forwarding
+        sysctl net.ipv4.ip_forward=1
+        sed -i -e 's/#net.ipv4.ip_forward=1/net.ipv4.ip_forward=1/g' /etc/sysctl.conf
+        iptables -t nat -A PREROUTING -i eth1 -p tcp --dport 80 -j REDIRECT --to-port 3128
+
+        ## update routing
+        ip route delete default
+        ip route add default via 198.19.98.245
+        ip route add 10.1.10.0/24 via 198.19.98.7
+        ipaddr=$$(ip addr show dev eth0 |egrep -o 'inet [0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.' | cut -d' ' -f2)
+        ip route add 8.8.8.8 via $${ipaddr}1
+
+        ## add nameserver
+        echo "nameserver 8.8.8.8" > /etc/resolv.conf
+
+        ## start squid
+        /sbin/entrypoint.sh
+
+
+  # SSLO Security Service: Inline Layer 3
+  layer3-service:
+    container_name: layer3
+    image: nsherron/suricata
+    restart: unless-stopped
+    privileged: true
+    environment:
+      - INTERFACE=eth0
+    cap_add:
+      - NET_ADMIN
+      - SYS_NICE
+    networks:
+      default: {}
+      layer3-net-in:
+        ipv4_address: 198.19.64.30
+      layer3-net-out:
+        ipv4_address: 198.19.64.130
+    command:
+      - /bin/bash
+      - -c
+      - |
+        ## install utilities
+        apt update -y
+        apt install apt-utils net-tools iproute2 tcpdump iputils-ping dnsutils vim nano -y
+
+        ## update suricata
+        sed -i 's/HOME_NET: \"\[192.168.0.0\/16,10.0.0.0\/8,172.16.0.0\/12\]\"/#HOME_NET: \"\[192.168.0.0\/16,10.0.0.0\/8,172.16.0.0\/12\]\"/g' /etc/suricata/suricata.yaml
+        sed -i 's/#HOME_NET: \"any\"/HOME_NET: \"any\"/g' /etc/suricata/suricata.yaml
+        sed -i 's/EXTERNAL_NET: \"!$$HOME_NET\"/#EXTERNAL_NET: \"!$$HOME_NET\"/g' /etc/suricata/suricata.yaml
+        sed -i 's/#EXTERNAL_NET: \"any\"/EXTERNAL_NET: \"any\"/g' /etc/suricata/suricata.yaml
+        sed -i 's/eth0/eth1/g' /etc/suricata/suricata.yaml
+        sed -i 's/eth2/eth1/g' /etc/suricata/suricata.yaml
+        sed -i 's/\/usr\/bin\/suricata \$$\{ARGS\} \$$\{SURICATA_OPTIONS\} \$$@//g' /docker-entrypoint.sh
+
+        ## update routing
+        ip route delete default
+        ip route add default via 198.19.64.245
+        ip route add 10.1.10.50 via 198.19.64.7
+
+        ## start suricata
+        suricata -c /etc/suricata/suricata.yaml -i eth1
+
+
+  # SSLO Security Service: ICAP (enhanced)
+  icap-service:
+    container_name: icap-service
+    image: deepdiver/icap-clamav-service
+    restart: unless-stopped
+    user: root
+    cap_add:
+      - NET_ADMIN
+    ports:
+      - '1344:1344'
+    networks:
+      default: {}
+      icap-net-in:
+        ipv4_address: 198.19.97.50
+    tty: true
+    entrypoint: /bin/bash
+    command: 
+      - -c
+      - |
+        ## Update clamav
+        apt update && apt upgrade -y clamav
+
+        ## Install syslg-ng (relay)
+        apt install -y syslog-ng
+
+        ## Create c-icap config file
+        cat > "/etc/c-icap/c-icap-custom.conf" << 'EOF'
+        ## Paths
+        PidFile           /var/run/c-icap/c-icap.pid
+        CommandsSocket    /var/run/c-icap/c-icap.ctl
+        ModulesDir        /usr/lib/x86_64-linux-gnu/c_icap
+        ServicesDir       /usr/lib/x86_64-linux-gnu/c_icap
+        TemplateDir       /usr/share/c_icap/templates/
+        LoadMagicFile     /etc/c-icap/c-icap.magic
+        TmpDir            /tmp
+
+        ## User/System
+        User c-icap
+        Group nogroup
+        ServerAdmin you@your.address
+        ServerName YourServerName
+
+        ## ACL/Port
+        acl all src 0.0.0.0/0.0.0.0
+        icap_access allow all
+        Port 1344
+
+        ## Handlers
+        Timeout                       300
+        MaxKeepAliveRequests          100
+        KeepAliveTimeout              600
+        StartServers                  1
+        MaxServers                    10
+        MinSpareThreads               10
+        MaxSpareThreads               20
+        ThreadsPerChild               10
+        MaxRequestsPerChild           0
+        MaxMemObject                  131072
+        Pipelining                    on
+
+        ## Modules
+        Module common clamav_mod.so
+        clamav_mod.MaxScanSize 100M
+        Module logger sys_logger.so
+
+        ## Debug/Logging
+        DebugLevel 1
+        ServerLog /var/log/c-icap/server.log
+        AccessLog /var/log/c-icap/access.log
+        
+        Logger sys_logger
+        sys_logger.access all
+        sys_logger.Facility local7
+        sys_logger.access_priority info
+        sys_logger.server_priority info
+
+        ## Services
+        Service antivirus_module virus_scan.so
+        ServiceAlias srv_clamav virus_scan
+        ServiceAlias avscan virus_scan?allow204=on&sizelimit=off&mode=simple
+
+        ## Services: virus_scan
+        virus_scan.ScanFileTypes TEXT DATA EXECUTABLE ARCHIVE GIF JPEG MSOFFICE
+        virus_scan.SendPercentData            5
+        virus_scan.StartSendPercentDataAfter  2M
+        virus_scan.MaxObjectSize              5M
+        EOF
+
+        ## Update and restart syslog-ng.conf
+        echo 'destination d_relay {network("10.1.1.8" port(514) transport("udp") flags(syslog-protocol));};' >> /etc/syslog-ng/syslog-ng.conf
+        echo 'filter f_relay {facility(local7) and match("VIRUS" value("MESSAGE"));};' >> /etc/syslog-ng/syslog-ng.conf
+        echo 'log {source(s_src);filter(f_relay);destination(d_relay);};' >> /etc/syslog-ng/syslog-ng.conf
+        service syslog-ng restart
+
+        ## Update freshclam
+        /usr/bin/freshclam --verbose
+
+        ## Start c-icap service
+        /usr/bin/c-icap -f /etc/c-icap/c-icap-custom.conf -D -N
+
+
+
+
+  ##############################################
+  ### Beacon Server
+  ##############################################
+
+  beacon-server:
+    # ref: https://github.com/snowblind-/beaconServer/blob/main/c%2BcServer.py
+    container_name: beacon-server
+    image: ubuntu:22.04
+    restart: unless-stopped
+    expose:
+      - 80
+    command:
+      - /bin/bash
+      - -c
+      - |
+        ## update and install required binaries
+        apt update
+        apt install -y iproute2 curl iputils-ping net-tools python3 python3-pip
+        pip3 install waitress
+
+        ## create beaconServer.py
+        cat > "/beaconServer.py" << 'EOF'
+        from waitress import serve
+        import logging
+        import json
+        import ssl
+        from socket import socket
+        from wsgiref.simple_server import make_server
+
+        # Set up logging
+        logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
+
+        # Predefined response message
+        RESPONSE_MESSAGE = "all your bases r belong to us"
+
+        # WSGI Application that simulates a C&C server
+        def app(environ, start_response):
+            try:
+                # Read the incoming JSON payload
+                content_length = int(environ.get('CONTENT_LENGTH', 0))
+                post_data = environ['wsgi.input'].read(content_length).decode('utf-8')
+                data = json.loads(post_data)
+                
+                # Log the received payload for debugging or monitoring
+                logging.info("Received beacon with payload: %s", data)
+
+                # Response headers
+                response_headers = [
+                    ('Content-type', 'application/json'),
+                    ('Access-Control-Allow-Origin', '*')  # Allow cross-origin requests if needed
+                ]
+                
+                # Create the response body
+                response_body = json.dumps({"message": RESPONSE_MESSAGE})
+
+                # Return the response
+                start_response('200 OK', response_headers)
+                return [response_body.encode('utf-8')]
+
+            except Exception as e:
+                # If there's an error, log it and respond with an error message
+                logging.error("Error processing beacon: %s", e)
+                response_headers = [('Content-type', 'application/json')]
+                response_body = json.dumps({"error": "Failed to process beacon"})
+                start_response('400 Bad Request', response_headers)
+                return [response_body.encode('utf-8')]
+
+
+        # Main function to start the server with HTTPS
+        def run_server():
+            logging.info("C&C server is starting...")
+
+            # Create a raw socket to wrap it in SSL
+            httpd = make_server('0.0.0.0', 80, app)
+
+            # Run the server
+            logging.info("Serving on https://0.0.0.0:80...")
+            httpd.serve_forever()
+
+        if __name__ == "__main__":
+            run_server()
+        EOF
+
+        ## start beaconClient
+        python3 /beaconServer.py
+
+
+
+
+  ##############################################
+  ### Web Servers
+  ##############################################
+
+  # HTTPS Web Server (Apache with sample website)
+  webserver:    
+    container_name: webserver
+    image: httpd:2.4
+    restart: unless-stopped
+    expose:
+      - 80
+    volumes:
+      - "./site:/usr/local/apache2/htdocs"
+
+  # Juiceshop1 (WAF testing)
+  juiceshop1:
+    container_name: juiceshop1
+    image: bkimminich/juice-shop
+    restart: unless-stopped
+    expose:
+      - 3000
+
+  # Juiceshop2 (WAF testing)
+  juiceshop2:
+    container_name: juiceshop2
+    image: bkimminich/juice-shop
+    restart: unless-stopped
+    expose:
+      - 3000
+
+  # NGINX Frontend (Juiceshop HTTPS frontend)
+  nginx:
+    container_name: nginx
+    image: nginx:alpine
+    restart: unless-stopped
+    cap_add:
+      - NET_ADMIN
+    ports:
+      - 80:80
+      - 443:443
+    networks:
+      default: {}
+      webserver-net:
+        ipv4_address: 192.168.100.10
+    command:
+      - /bin/sh
+      - -c
+      - |
+        ## create /data directory
+        mkdir -p /data
+
+        ## create eicar file
+        cat > "/data/eicar.txt" << 'EOF'
+        X5O!P%@AP[4\PZX54(P^)7CC)7}$$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$$H+H*
+        EOF
+
+        ## create nginx.conf
+        cat > "/etc/nginx/nginx.conf" << 'EOF'
+        events {}
+        http {
+            server {
+                ## juiceshop1
+                listen 192.168.100.20:443 ssl;
+                server_name juiceshop1.local;
+                ssl_certificate /ssl/server.crt;
+                ssl_certificate_key /ssl/server.key;
+                access_log /var/log/nginx/data-access.log combined;
+                location / {
+                    proxy_pass http://juiceshop1:3000/;
+                    proxy_set_header Host $$host;
+                    proxy_set_header X-Real-IP  $$remote_addr;
+                    proxy_set_header X-Forwarded-For $$remote_addr;
+                    proxy_set_header X-Forwarded-Proto $$scheme;
+                    proxy_buffering off;
+                    proxy_redirect off;
+                }
+            }
+            server {
+                ## juiceshop2
+                listen 192.168.100.21:443 ssl;
+                server_name juiceshop2.local;
+                ssl_certificate /ssl/server.crt;
+                ssl_certificate_key /ssl/server.key;
+                access_log /var/log/nginx/data-access.log combined;
+                location / {
+                    proxy_pass http://juiceshop2:3000/;
+                    proxy_set_header Host $$host;
+                    proxy_set_header X-Real-IP  $$remote_addr;
+                    proxy_set_header X-Forwarded-For $$remote_addr;
+                    proxy_set_header X-Forwarded-Proto $$scheme;
+                    proxy_buffering off;
+                    proxy_redirect off;
+                }
+            }
+            server {
+                ## webserver 1
+                listen 192.168.100.11:443 ssl;
+                server_name webserver.local;
+                ssl_certificate /ssl/server.crt;
+                ssl_certificate_key /ssl/server.key;
+                access_log /var/log/nginx/data-access.log combined;
+                location / {
+                    proxy_pass http://webserver:80/;
+                    proxy_set_header Host $$host;
+                    proxy_set_header X-Real-IP  $$remote_addr;
+                    proxy_set_header X-Forwarded-For $$remote_addr;
+                    proxy_set_header X-Forwarded-Proto $$scheme;
+                    proxy_buffering off;
+                    proxy_redirect off;
+                }
+            }
+            server {
+                ## webserver 2
+                listen 192.168.100.12:443 ssl;
+                server_name webserver.local;
+                ssl_certificate /ssl/server.crt;
+                ssl_certificate_key /ssl/server.key;
+                access_log /var/log/nginx/data-access.log combined;
+                location / {
+                    proxy_pass http://webserver:80/;
+                    proxy_set_header Host $$host;
+                    proxy_set_header X-Real-IP  $$remote_addr;
+                    proxy_set_header X-Forwarded-For $$remote_addr;
+                    proxy_set_header X-Forwarded-Proto $$scheme;
+                    proxy_buffering off;
+                    proxy_redirect off;
+                }
+            }
+            server {
+                ## webserver 3
+                listen 192.168.100.13:443 ssl;
+                server_name webserver.local;
+                ssl_certificate /ssl/server.crt;
+                ssl_certificate_key /ssl/server.key;
+                access_log /var/log/nginx/data-access.log combined;
+                location / {
+                    proxy_pass http://webserver:80/;
+                    proxy_set_header Host $$host;
+                    proxy_set_header X-Real-IP  $$remote_addr;
+                    proxy_set_header X-Forwarded-For $$remote_addr;
+                    proxy_set_header X-Forwarded-Proto $$scheme;
+                    proxy_buffering off;
+                    proxy_redirect off;
+                }
+            }
+            server {
+                ## webserver 4 (eicar download)
+                listen 192.168.100.14:443 ssl;
+                server_name webserver.local;
+                ssl_certificate /ssl/server.crt;
+                ssl_certificate_key /ssl/server.key;
+                access_log /var/log/nginx/data-access.log combined;
+                #autoindex on;
+                location "/" {
+                    root /data;
+                    index eicar.txt;
+                    try_files $$uri $$uri/ =404;
+                }                
+            }
+            server {
+                ## beacon server
+                listen 192.168.100.15:443 ssl;
+                server_name beacon-server.local;
+                ssl_certificate /ssl/server.crt;
+                ssl_certificate_key /ssl/server.key;
+                access_log /var/log/nginx/data-access.log combined;
+                location / {
+                    proxy_pass http://beacon-server:80/;
+                    proxy_set_header Host $$host;
+                    proxy_set_header X-Real-IP  $$remote_addr;
+                    proxy_set_header X-Forwarded-For $$remote_addr;
+                    proxy_set_header X-Forwarded-Proto $$scheme;
+                    proxy_buffering off;
+                    proxy_redirect off;
+                }
+            }
+        }
+        EOF
+
+        ## make /ssl directory
+        mkdir -p /ssl
+
+        ## create server.crt
+        cat > /ssl/server.crt <<EOF
+        -----BEGIN CERTIFICATE-----
+        MIIEhTCCA22gAwIBAgIBAzANBgkqhkiG9w0BAQsFADBeMQswCQYDVQQGEwJVUzET
+        MBEGA1UEChMKZjVsYWJzLmNvbTEeMBwGA1UECxMVU3Vib3JkaW5hdGUgQXV0aG9y
+        aXR5MRowGAYDVQQDExFzdWJyc2EuZjVsYWJzLmNvbTAeFw0xOTAyMjcxMDUzNDFa
+        Fw0zMDA1MTYxMDUzNDFaMFoxCzAJBgNVBAYTAlVTMRMwEQYDVQQKEwpmNWxhYnMu
+        Y29tMR8wHQYDVQQLExZXZWIgU2VydmVyIENlcnRpZmljYXRlMRUwEwYDVQQDFAwq
+        LmY1bGFicy5jb20wggEiMA0GCSqGSIb3DQEBAQUAA4IBDwAwggEKAoIBAQCwkIHU
+        VcscXyh+oAnzSsHCMMsUfzJ8vWIM+jLnOMv5Mx0pCrDkKrtB4yRPY2OHQD9I0/sJ
+        BRK4QTAqEr+nfdBmZUFBPfppedx4snn22vlLGtcd/xcrjRo5LQCYzbBQzZfiPtuc
+        13tj/QWGwRL3fBKlwAQn2lRlBM7VLVL9C3PLKRBys7DVr3n6IerBUmjNlCXPtZnS
+        bmhDW6SufC8CwgO/Ig2/liEyZEekjJbacBf00Oo6721sG0UjveLTQP/FZy5+tru8
+        yW36ef/bcPHiS4dF8vMyqyWxzmwmQfZiLPSDbDbW0pSJm8lVBVGGqRTejqbnjrsi
+        gsyYssRi50WTqhUVAgMBAAGjggFQMIIBTDA3BglghkgBhvhCAQ0EKhYoT3BlblNT
+        TCBnZW5lcmF0ZWQgd2ViIHNlcnZlciBjZXJ0aWZpY2F0ZTAdBgNVHQ4EFgQU+dmb
+        Tm1KkLQzUWA5jO/1eEwFb2gwfwYDVR0jBHgwdoAUoj6jeoxBHa7/Ew1a4vUMZ/94
+        grKhW6RZMFcxCzAJBgNVBAYTAlVTMRMwEQYDVQQKEwpmNWxhYnMuY29tMR4wHAYD
+        VQQLExVDZXJ0aWZpY2F0ZSBBdXRob3JpdHkxEzARBgNVBAMTCmY1bGFicy5jb22C
+        AQIwFwYDVR0RBBAwDoIMKi5mNWxhYnMuY29tMCMGA1UdIAQcMBowCwYJYIZIAWUC
+        AQsFMAsGCWCGSAFlAgELEjAjBgNVHSUEHDAaBggrBgEFBQcDAQYIKwYBBQUIAgIG
+        BFUdJQAwDgYDVR0PAQH/BAQDAgWgMA0GCSqGSIb3DQEBCwUAA4IBAQCYwRlMbIKI
+        f8e98n307sddAC00rdg98bOUpteMTj8hgsWgfhOY4jXDpFWduMvCpUQOh917qOqO
+        d+2wgtdQFoeuVyvcgw3vXEuEN8rjFLPs3d4ksKeQY1ROW0iuhsdh8ieokT5JV2Ik
+        Hl11RCZjfjDfmren5bXj3s8jsJ7t+KpmsqKk9sGdguzXa89W8Ux5EMb41PWiF8eC
+        MhkXHAtqOkL0FjRTfRgDrcfncdG1pTyVuk4cIH8qvuA2hA1qpyJg6tjOrJSmv4l1
+        mEyU7jhai/Q/Nd13rK2DiaePmUWv5X1H2rvunLCIaGpPcPGYN39bdZYgEGqobUcj
+        YuhVM5A1WV9K
+        -----END CERTIFICATE-----
+        EOF
+
+        ## create server.key
+        cat > /ssl/server.key <<EOF
+        -----BEGIN RSA PRIVATE KEY-----
+        MIIEowIBAAKCAQEAsJCB1FXLHF8ofqAJ80rBwjDLFH8yfL1iDPoy5zjL+TMdKQqw
+        5Cq7QeMkT2Njh0A/SNP7CQUSuEEwKhK/p33QZmVBQT36aXnceLJ59tr5SxrXHf8X
+        K40aOS0AmM2wUM2X4j7bnNd7Y/0FhsES93wSpcAEJ9pUZQTO1S1S/QtzyykQcrOw
+        1a95+iHqwVJozZQlz7WZ0m5oQ1ukrnwvAsIDvyINv5YhMmRHpIyW2nAX9NDqOu9t
+        bBtFI73i00D/xWcufra7vMlt+nn/23Dx4kuHRfLzMqslsc5sJkH2Yiz0g2w21tKU
+        iZvJVQVRhqkU3o6m5467IoLMmLLEYudFk6oVFQIDAQABAoIBAGMh/4L0WIGpe9b8
+        jBmpU3hwZNUxRWt7+V1H7OSdowhbhnfQpNi2lUS8/1oDd5IspFuDiWLbElOZZi15
+        MVoc7bFQEH9NCRfHb93kd03+TBG7FCSnYJ73Lk4D0l34vpHfnPNOT4eUBJdzLHMo
+        XDnP07h0QuENWG0PcgGG3R1uHKlniYUKiSArYJ1w8aTCoIN+01K2nRMj2UxGQqRK
+        WBC6euoZI0BcDtQluYqYTy656dYMWf/mT7TUHJYXyrXcNzu54B3SYp3fxxv6PzCJ
+        PCvByeBkVyaO+Nc0sFoNiZeWn4RrCZw9+nAj87G/ZOyPPy9FK4zhXQEQmYU2MhFV
+        iJgEuIECgYEA5UpIOiVmjp/MEOR21wItHXxPb/OwnMmIqE0ohL++IvmDS0vnM2f0
+        85eOHrdJlvGQLa+GOykkB4LTKdvVcxEW7RtmRhRS08O5t3m1WkI70b5P7xgG7hZe
+        ECNpcKKsRmEmugI76xyVid/6sdK5DxKtJZMEes3VpTYIc1qt0QLRMo0CgYEAxSHh
+        KmsDwjAblU7JxyDQinjJtbL80yDGKgeusQ78Hb3T4D8XUk7eqS2DbKaNReBIx15M
+        Op3GAE5DBMoQ7jCskNB4cm2Wixq3vrg5A19mlImDhEPJNM8ifyPkxQ0sFf+wnZcd
+        66T43PxonKt58gxNhKfMY1KpWeH1J25N7JT8DqkCgYA2He4mKyWli/myEvopjQ3w
+        46IsHiwVFUv3zR4/FrJdtt5SKzwKWgLqa17TyRbJVYJeBgt8cx1Z2HrWalharDHp
+        DIp7B9j0ukFfGI7BGtjbjDt5hwY7s3PIA1OjjgFzKwLk7BoQR9LTk9Wrmryq3hGX
+        yLdJ9ML0F2ivMTvNFQkjEQKBgQCW41bIs/69fTsvro3NqDVXOBsUw7q3E6f6dcTl
+        65VYYnsxcrk0HABcN+UXnegWaxTp3Si12Ru8EitEGDKbTpBXi+oVlAId2UZ5aeLh
+        zPzkhtkuvP/eNwmtjVjG500uTXbvOMMDIlQGOgEMokgF2Brhhdpwz82macjO9KQa
+        iPLheQKBgEJD5hq3VqhV00FQVL7KyOUj9p5hrhke9LRDT8Qo+HnT7fqeDfXtTf22
+        NlaXx+7qCY/NggA1M2Y6UENJ2Dd0RibPk8pMv/Y5mQDSB9Pjwij0pKZGx36jAcC0
+        banR16qZgwqZFimS/D2r14qcGNRJxTmFoW7KnTfs0QYJ3l2S47so
+        -----END RSA PRIVATE KEY-----
+        EOF
+
+        ## add ipv4 addresses (webservers)
+        ip address add 192.168.100.11 dev eth1
+        ip address add 192.168.100.12 dev eth1
+        ip address add 192.168.100.13 dev eth1
+        
+        ## add ipv4 addresses (eicar-server)
+        ip address add 192.168.100.14 dev eth1
+
+        ## add ipv4 addresses (beacon-server)
+        ip address add 192.168.100.15 dev eth1
+
+        ## add ipv4 addresses (juiceshops)
+        ip address add 192.168.100.20 dev eth1
+        ip address add 192.168.100.21 dev eth1
+
+        ## start nginx
+        nginx -g 'daemon off;'
+
+
+
+
+  ##############################################
+  ### Guacamole (client WebRDP)
+  ##############################################
+
+  # Additional Services: Guacamole Daemon
+  guacd:
+    container_name: guacd_compose
+    image: guacamole/guacd
+    restart: unless-stopped
+    networks:
+      default: {}
+    volumes:
+      - ./configs/webrdp/drive:/drive:rw
+      - ./configs/webrdp/record:/record:rw
+
+  # Additional Services: Guacamole Postgres Database
+  postgres:
+    container_name: postgres_guacamole_compose
+    image: postgres:13.4-buster
+    restart: unless-stopped
+    environment:
+      PGDATA: /var/lib/postgresql/data/guacamole
+      POSTGRES_DB: guacamole_db
+      POSTGRES_PASSWORD: 'password'
+      POSTGRES_USER: guacamole_user
+    networks:
+      default: {}
+    volumes:
+      - ./configs/webrdp/init:/docker-entrypoint-initdb.d:z
+      - ./configs/webrdp/data:/var/lib/postgresql/data:Z
+
+  # Additional Services: Guacamole
+  guacamole:
+    container_name: guacamole_compose
+    image: guacamole/guacamole
+    restart: unless-stopped
+    depends_on:
+      - guacd
+      - postgres
+    environment:
+      GUACD_HOSTNAME: guacd
+      POSTGRES_DATABASE: guacamole_db
+      POSTGRES_HOSTNAME: postgres
+      POSTGRES_PASSWORD: 'password'
+      POSTGRES_USER: guacamole_user
+    links:
+      - guacd
+    networks:
+      default: {}
+    ports:
+      - 8080:8080/tcp
+
+
+
+
+  ##############################################
+  ### BIND9 DNS SERVER
+  ##############################################
+  
+  # bind9 dns server
+  bind9:
+    container_name: bind9
+    image: ubuntu/bind9:9.18-22.04_beta
+    restart: unless-stopped
+    networks:
+      default: {}
+      webserver-net:
+        ipv4_address: 192.168.100.8
+    command:
+      - /bin/bash
+      - -c
+      - |
+        ## Install and start ssh server
+        apt update
+        apt install dnsutils -y
+
+        ## Make some directories
+        mkdir -p /etc/bind
+        mkdir -p /var/cache/bind
+        mkdir -p /var/lib/bind
+
+        ## Create named.conf
+        cat > "/etc/bind/named.conf" << 'EOF'
+        options {
+                directory "/var/cache/bind";
+                recursion yes;
+                allow-query { any; };
+                listen-on { any; };
+                listen-on-v6 { any; };
+                forwarders {
+                      10.1.1.1;
+                };
+        };
+        zone "badguy.com" {
+                type primary;
+                file "/var/lib/bind/db.badguy.com";
+                update-policy {
+                      grant rndc-key zonesub any;
+                      grant * self . TXT;
+                };
+        };
+        EOF
+
+        ## Create badguy.com zone file
+        cat > "/var/lib/bind/db.badguy.com" <<'EOF'
+        $$TTL 5 ;
+        $$ORIGIN badguy.com.
+
+        @       IN      SOA     ns.     hostmaster (
+        2003080801 ; serial number
+        12h        ; refresh
+        15m        ; update retry
+        3w         ; expiry
+        2h         ; minimum
+        )
+
+        ; ns entry
+        @               IN      NS      ns.
+        @               IN      A       192.168.100.8
+
+        ; wildcard entry for anything *.f5labs.local
+        web1             IN      A       192.168.100.11
+        web2             IN      A       192.168.100.12
+        web3             IN      A       192.168.100.13
+        infected         IN      A       192.168.100.14
+        c2               IN      A       192.168.100.15
+        juice1           IN      A       192.168.100.20
+        juice1           IN      A       192.168.100.21
+        EOF
+
+        ## Perform additional tweaks
+        chmod -R 777 /var/lib/bind/
+
+        ## Start named
+        /usr/local/bin/docker-entrypoint.sh
+
+
+
+
+##############################################
+### Networks
+##############################################
+
+networks:
+  default:
+    driver: bridge
+
+  eproxy-net-in:
+    driver: macvlan
+    driver_opts:
+      parent: ens6.30
+    ipam:
+      driver: default
+      config:
+        - subnet: 198.19.96.0/25
+
+  eproxy-net-out:
+    driver: macvlan
+    driver_opts:
+      parent: ens6.40
+    ipam:
+      driver: default
+      config:
+        - subnet: 198.19.96.128/25
+
+  layer3-net-in:
+    driver: macvlan
+    driver_opts:
+      parent: ens6.60
+    ipam:
+      driver: default
+      config:
+        - subnet: 198.19.64.0/25
+
+  layer3-net-out:
+    driver: macvlan
+    driver_opts:
+      parent: ens6.70
+    ipam:
+      driver: default
+      config:
+        - subnet: 198.19.64.128/25
+
+  tproxy-net-in:
+    driver: macvlan
+    driver_opts:
+      parent: ens6.10
+    ipam:
+      driver: default
+      config:
+        - subnet: 198.19.98.0/25
+
+  tproxy-net-out:
+    driver: macvlan
+    driver_opts:
+      parent: ens6.20
+    ipam:
+      driver: default
+      config:
+        - subnet: 198.19.98.128/25
+
+  webserver-net:
+    driver: macvlan
+    driver_opts:
+      parent: ens6.80
+    ipam:
+      driver: default
+      config:
+        - subnet: 192.168.100.0/24
+
+  icap-net-in:
+    driver: macvlan
+    driver_opts:
+      parent: ens6.50
+    ipam:
+      driver: default
+      config:
+        - subnet: 198.19.97.0/25
