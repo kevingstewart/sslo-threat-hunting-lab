@@ -276,6 +276,7 @@ services:
       ## create beaconClient.py
       cat > "/carePackage.py" << 'EOF'
       #!/usr/bin/env python3
+      import os
       import time
       from urllib.request import Request, urlopen
       import mimetypes
