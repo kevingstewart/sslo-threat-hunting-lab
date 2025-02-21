@@ -26,6 +26,7 @@
 ##        - eicar-server:  192.168.100.14:443 
 ##        - beacon-server: 192.168.100.15:443
 ##        - doh-server:    192.168.100.16:443
+##        - raftman:       192.168.100.17:514
 ##        - juiceshop2:    192.168.100.20:443
 ##        - juiceshop1:    192.168.100.21:443
 ##   - doh-server
@@ -468,6 +469,8 @@ services:
     restart: unless-stopped
     networks:
       default: {}
+      webserver-net:
+        ipv4_address: 192.168.100.17
     ports:
     - 514:514
     - 5514:5514
